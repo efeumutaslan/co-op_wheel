@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { supabase } from '@/lib/supabase'
+import { supabase, roomDB } from '@/lib/supabase'
 import Wheel from '@/components/Wheel'
 import Confetti from '@/components/Confetti'
 
@@ -32,6 +32,7 @@ export default function Home() {
   const [winner, setWinner] = useState(null)
   const [showConfetti, setShowConfetti] = useState(false)
   const [error, setError] = useState('')
+  const [loading, setLoading] = useState(false)
   const [connectionStatus, setConnectionStatus] = useState('disconnected')
   const [copied, setCopied] = useState(false)
   
@@ -39,53 +40,35 @@ export default function Home() {
   const spinTimeoutRef = useRef(null)
 
   // Supabase Realtime'a bağlan
-  const connectToRoom = useCallback((roomCode, roomData) => {
+  const connectToRoom = useCallback((roomCode) => {
     if (channelRef.current) {
       supabase.removeChannel(channelRef.current)
     }
 
-    const channel = supabase.channel(`room:${roomCode}`, {
-      config: {
-        broadcast: { self: true },
-        presence: { key: username }
-      }
-    })
-
-    channel
-      .on('broadcast', { event: 'room_update' }, ({ payload }) => {
-        console.log('Room update received:', payload)
-        setCurrentRoom(payload.room)
-      })
-      .on('broadcast', { event: 'spin_start' }, ({ payload }) => {
-        console.log('Spin start received:', payload)
-        if (!spinning) {
-          handleRemoteSpin(payload)
-        }
-      })
-      .on('broadcast', { event: 'spin_result' }, ({ payload }) => {
-        console.log('Spin result received:', payload)
+    const channel = roomDB.subscribeToRoom(roomCode, (event, payload) => {
+      console.log('Realtime event:', event, payload)
+      
+      if (event === 'room_update') {
+        setCurrentRoom(payload)
+      } else if (event === 'spin_start' && !spinning) {
+        handleRemoteSpin(payload)
+      } else if (event === 'spin_result') {
         setWinner({ name: payload.winner })
         setShowConfetti(true)
         setTimeout(() => setShowConfetti(false), 4000)
-      })
-      .on('broadcast', { event: 'user_joined' }, ({ payload }) => {
-        console.log('User joined:', payload)
-      })
-      .on('presence', { event: 'sync' }, () => {
-        const state = channel.presenceState()
-        console.log('Presence sync:', state)
-      })
-      .subscribe((status) => {
-        console.log('Channel status:', status)
-        if (status === 'SUBSCRIBED') {
-          setConnectionStatus('connected')
-          channel.track({ username, joinedAt: new Date().toISOString() })
-        }
-      })
+      }
+    })
+
+    channel.subscribe((status) => {
+      console.log('Channel status:', status)
+      if (status === 'SUBSCRIBED') {
+        setConnectionStatus('connected')
+      }
+    })
 
     channelRef.current = channel
     return channel
-  }, [username, spinning])
+  }, [spinning])
 
   // Uzaktan gelen çevirmeyi işle
   const handleRemoteSpin = (payload) => {
@@ -114,35 +97,6 @@ export default function Home() {
     }
   }, [])
 
-  // LocalStorage'dan oda verisi yükle/kaydet
-  const saveRoomToStorage = (room) => {
-    if (typeof window !== 'undefined') {
-      localStorage.setItem(`room:${room.code}`, JSON.stringify(room))
-    }
-  }
-
-  const loadRoomFromStorage = (code) => {
-    if (typeof window !== 'undefined') {
-      const data = localStorage.getItem(`room:${code}`)
-      return data ? JSON.parse(data) : null
-    }
-    return null
-  }
-
-  // Broadcast ile oda güncelle
-  const broadcastRoomUpdate = async (room) => {
-    saveRoomToStorage(room)
-    setCurrentRoom(room)
-    
-    if (channelRef.current) {
-      await channelRef.current.send({
-        type: 'broadcast',
-        event: 'room_update',
-        payload: { room }
-      })
-    }
-  }
-
   // Oda oluştur
   const createRoom = async () => {
     if (!username.trim()) {
@@ -150,24 +104,33 @@ export default function Home() {
       return
     }
 
-    const code = generateCode()
-    const newRoom = {
-      code,
-      name: `${username}'in Çarkı`,
-      createdAt: new Date().toISOString(),
-      admin: username,
-      moderators: [],
-      participants: [{ name: username, joinedAt: new Date().toISOString() }],
-      items: [],
-      spinHistory: []
-    }
-
-    saveRoomToStorage(newRoom)
-    setCurrentRoom(newRoom)
-    setCurrentUser({ name: username, role: 'admin' })
-    connectToRoom(code, newRoom)
-    setView('room')
+    setLoading(true)
     setError('')
+
+    try {
+      const code = generateCode()
+      const newRoom = {
+        code,
+        name: `${username}'in Çarkı`,
+        admin: username,
+        moderators: [],
+        participants: [{ name: username, joinedAt: new Date().toISOString() }],
+        items: [],
+        spinHistory: []
+      }
+
+      await roomDB.create(newRoom)
+      
+      setCurrentRoom(newRoom)
+      setCurrentUser({ name: username, role: 'admin' })
+      connectToRoom(code)
+      setView('room')
+    } catch (err) {
+      console.error('Create room error:', err)
+      setError('Oda oluşturulamadı. Lütfen tekrar deneyin.')
+    } finally {
+      setLoading(false)
+    }
   }
 
   // Odaya katıl
@@ -181,46 +144,43 @@ export default function Home() {
       return
     }
 
-    const code = joinCode.toUpperCase().trim()
-    
-    // Önce localStorage'dan kontrol et
-    let room = loadRoomFromStorage(code)
-    
-    if (!room) {
-      // Oda bulunamadı - Supabase Realtime ile sync olana kadar bekle
-      // Şimdilik boş bir oda ile başla
-      setError('Oda bulunamadı veya henüz senkronize edilmedi. Kod doğruysa tekrar deneyin.')
-      return
-    }
-
-    // Kullanıcı zaten var mı?
-    const existingUser = room.participants.find(p => p.name === username)
-    if (!existingUser) {
-      room.participants.push({ name: username, joinedAt: new Date().toISOString() })
-    }
-
-    // Rol belirle
-    let role = 'participant'
-    if (room.admin === username) role = 'admin'
-    else if (room.moderators?.includes(username)) role = 'moderator'
-
-    saveRoomToStorage(room)
-    setCurrentRoom(room)
-    setCurrentUser({ name: username, role })
-    
-    const channel = connectToRoom(code, room)
-    
-    // Katılımı bildir
-    setTimeout(() => {
-      channel.send({
-        type: 'broadcast',
-        event: 'user_joined',
-        payload: { username, room }
-      })
-    }, 1000)
-    
-    setView('room')
+    setLoading(true)
     setError('')
+
+    try {
+      const code = joinCode.toUpperCase().trim()
+      
+      // Veritabanından odayı al
+      const room = await roomDB.get(code)
+      
+      if (!room) {
+        setError('Oda bulunamadı! Kodu kontrol edin.')
+        setLoading(false)
+        return
+      }
+
+      // Kullanıcı zaten var mı kontrol et
+      const existingUser = room.participants.find(p => p.name === username)
+      if (!existingUser) {
+        room.participants.push({ name: username, joinedAt: new Date().toISOString() })
+        await roomDB.update(code, { participants: room.participants })
+      }
+
+      // Rol belirle
+      let role = 'participant'
+      if (room.admin === username) role = 'admin'
+      else if (room.moderators?.includes(username)) role = 'moderator'
+
+      setCurrentRoom(room)
+      setCurrentUser({ name: username, role })
+      connectToRoom(code)
+      setView('room')
+    } catch (err) {
+      console.error('Join room error:', err)
+      setError('Odaya katılınamadı. Lütfen tekrar deneyin.')
+    } finally {
+      setLoading(false)
+    }
   }
 
   // Çark öğesi ekle
@@ -228,38 +188,39 @@ export default function Home() {
     if (!newItemName.trim() || !currentRoom) return
     if (!['admin', 'moderator'].includes(currentUser.role)) return
 
-    const updatedRoom = {
-      ...currentRoom,
-      items: [...currentRoom.items, { id: Date.now(), name: newItemName.trim() }]
+    try {
+      const newItems = [...currentRoom.items, { id: Date.now(), name: newItemName.trim() }]
+      await roomDB.update(currentRoom.code, { items: newItems })
+      setCurrentRoom(prev => ({ ...prev, items: newItems }))
+      setNewItemName('')
+    } catch (err) {
+      console.error('Add item error:', err)
     }
-
-    await broadcastRoomUpdate(updatedRoom)
-    setNewItemName('')
   }
 
   // Çark öğesi sil
   const removeItem = async (itemId) => {
     if (!['admin', 'moderator'].includes(currentUser.role)) return
 
-    const updatedRoom = {
-      ...currentRoom,
-      items: currentRoom.items.filter(item => item.id !== itemId)
+    try {
+      const newItems = currentRoom.items.filter(item => item.id !== itemId)
+      await roomDB.update(currentRoom.code, { items: newItems })
+      setCurrentRoom(prev => ({ ...prev, items: newItems }))
+    } catch (err) {
+      console.error('Remove item error:', err)
     }
-
-    await broadcastRoomUpdate(updatedRoom)
   }
 
   // Tüm öğeleri temizle
   const clearAllItems = async () => {
     if (currentUser.role !== 'admin') return
 
-    const updatedRoom = {
-      ...currentRoom,
-      items: [],
-      spinHistory: []
+    try {
+      await roomDB.update(currentRoom.code, { items: [], spinHistory: [] })
+      setCurrentRoom(prev => ({ ...prev, items: [], spinHistory: [] }))
+    } catch (err) {
+      console.error('Clear items error:', err)
     }
-
-    await broadcastRoomUpdate(updatedRoom)
   }
 
   // Moderatör toggle
@@ -267,21 +228,25 @@ export default function Home() {
     if (currentUser.role !== 'admin') return
     if (participantName === currentRoom.admin) return
 
-    let newModerators = currentRoom.moderators || []
-    if (newModerators.includes(participantName)) {
-      newModerators = newModerators.filter(m => m !== participantName)
-    } else {
-      newModerators = [...newModerators, participantName]
-    }
+    try {
+      let newModerators = currentRoom.moderators || []
+      if (newModerators.includes(participantName)) {
+        newModerators = newModerators.filter(m => m !== participantName)
+      } else {
+        newModerators = [...newModerators, participantName]
+      }
 
-    const updatedRoom = { ...currentRoom, moderators: newModerators }
-    await broadcastRoomUpdate(updatedRoom)
+      await roomDB.update(currentRoom.code, { moderators: newModerators })
+      setCurrentRoom(prev => ({ ...prev, moderators: newModerators }))
 
-    if (participantName === currentUser.name) {
-      setCurrentUser(prev => ({
-        ...prev,
-        role: newModerators.includes(participantName) ? 'moderator' : 'participant'
-      }))
+      if (participantName === currentUser.name) {
+        setCurrentUser(prev => ({
+          ...prev,
+          role: newModerators.includes(participantName) ? 'moderator' : 'participant'
+        }))
+      }
+    } catch (err) {
+      console.error('Toggle moderator error:', err)
     }
   }
 
@@ -307,14 +272,10 @@ export default function Home() {
 
     // Çevirmeyi broadcast et
     if (channelRef.current) {
-      await channelRef.current.send({
-        type: 'broadcast',
-        event: 'spin_start',
-        payload: {
-          rotation: totalRotation,
-          spinBy: currentUser.name,
-          winner: winnerItem.name
-        }
+      await roomDB.broadcast(channelRef.current, 'spin_start', {
+        rotation: totalRotation,
+        spinBy: currentUser.name,
+        winner: winnerItem.name
       })
     }
 
@@ -330,19 +291,20 @@ export default function Home() {
         time: new Date().toISOString()
       }
 
-      const updatedRoom = {
-        ...currentRoom,
-        spinHistory: [historyEntry, ...(currentRoom.spinHistory || []).slice(0, 49)]
+      const newHistory = [historyEntry, ...(currentRoom.spinHistory || []).slice(0, 49)]
+      
+      try {
+        await roomDB.update(currentRoom.code, { spinHistory: newHistory })
+        setCurrentRoom(prev => ({ ...prev, spinHistory: newHistory }))
+      } catch (err) {
+        console.error('Update history error:', err)
       }
-
-      await broadcastRoomUpdate(updatedRoom)
 
       // Sonucu broadcast et
       if (channelRef.current) {
-        await channelRef.current.send({
-          type: 'broadcast',
-          event: 'spin_result',
-          payload: { winner: winnerItem.name, spinBy: currentUser.name }
+        await roomDB.broadcast(channelRef.current, 'spin_result', {
+          winner: winnerItem.name,
+          spinBy: currentUser.name
         })
       }
 
@@ -467,6 +429,7 @@ export default function Home() {
                   placeholder="Adını gir..."
                   className="w-full px-5 py-4 rounded-xl bg-white/10 border-2 border-white/20 focus:border-yellow-400 focus:outline-none text-lg text-white placeholder-white/40 transition-colors"
                   maxLength={20}
+                  disabled={loading}
                 />
               </div>
 
@@ -478,9 +441,10 @@ export default function Home() {
 
               <button
                 onClick={createRoom}
-                className="w-full py-4 bg-gradient-to-r from-yellow-400 to-orange-500 text-gray-900 rounded-xl font-bold text-lg hover:opacity-90 transition-opacity shadow-lg shadow-yellow-500/30"
+                disabled={loading}
+                className="w-full py-4 bg-gradient-to-r from-yellow-400 to-orange-500 text-gray-900 rounded-xl font-bold text-lg hover:opacity-90 transition-opacity shadow-lg shadow-yellow-500/30 disabled:opacity-50"
               >
-                Çark Oluştur 🚀
+                {loading ? '⏳ Oluşturuluyor...' : 'Çark Oluştur 🚀'}
               </button>
             </div>
           </div>
@@ -514,6 +478,7 @@ export default function Home() {
                   placeholder="Adını gir..."
                   className="w-full px-5 py-4 rounded-xl bg-white/10 border-2 border-white/20 focus:border-yellow-400 focus:outline-none text-lg text-white placeholder-white/40 transition-colors"
                   maxLength={20}
+                  disabled={loading}
                 />
               </div>
 
@@ -528,6 +493,7 @@ export default function Home() {
                   placeholder="XXXXXX"
                   className="w-full px-5 py-4 rounded-xl bg-white/10 border-2 border-white/20 focus:border-yellow-400 focus:outline-none text-2xl text-center tracking-[0.3em] font-mono text-white placeholder-white/40 transition-colors"
                   maxLength={6}
+                  disabled={loading}
                 />
               </div>
 
@@ -539,9 +505,10 @@ export default function Home() {
 
               <button
                 onClick={joinRoom}
-                className="w-full py-4 bg-gradient-to-r from-green-400 to-emerald-500 text-gray-900 rounded-xl font-bold text-lg hover:opacity-90 transition-opacity shadow-lg shadow-green-500/30"
+                disabled={loading}
+                className="w-full py-4 bg-gradient-to-r from-green-400 to-emerald-500 text-gray-900 rounded-xl font-bold text-lg hover:opacity-90 transition-opacity shadow-lg shadow-green-500/30 disabled:opacity-50"
               >
-                Katıl 🎉
+                {loading ? '⏳ Katılınıyor...' : 'Katıl 🎉'}
               </button>
             </div>
           </div>
