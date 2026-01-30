@@ -26,7 +26,6 @@ function TournamentBracket({ tournament, currentUser }) {
   const { mode, rounds, currentRound, eliminated, champion, participants } = tournament
 
   if (mode === 'survivor') {
-    // Son Kalan Kazanır modu
     const remaining = participants.filter(p => !eliminated.includes(p))
     
     return (
@@ -46,7 +45,6 @@ function TournamentBracket({ tournament, currentUser }) {
           </div>
         ) : (
           <>
-            {/* Remaining */}
             <div className="mb-4">
               <p className="text-white/60 text-sm mb-2">Kalanlar ({remaining.length})</p>
               <div className="flex flex-wrap gap-2">
@@ -61,7 +59,6 @@ function TournamentBracket({ tournament, currentUser }) {
               </div>
             </div>
 
-            {/* Eliminated */}
             {eliminated.length > 0 && (
               <div>
                 <p className="text-white/60 text-sm mb-2">Elenenler ({eliminated.length})</p>
@@ -118,17 +115,40 @@ function TournamentBracket({ tournament, currentUser }) {
                       }`}
                     >
                       <div className="flex items-center justify-between">
-                        <div className="flex items-center gap-2">
-                          <span className={`font-medium ${match.winner === match.player1 ? 'text-green-400' : match.winner ? 'text-red-400/60 line-through' : 'text-white'}`}>
-                            {match.player1 || '?'}
-                          </span>
-                          <span className="text-white/40">vs</span>
-                          <span className={`font-medium ${match.winner === match.player2 ? 'text-green-400' : match.winner ? 'text-red-400/60 line-through' : 'text-white'}`}>
-                            {match.player2 || '?'}
-                          </span>
+                        <div className="flex items-center gap-2 flex-wrap">
+                          {match.isTriple ? (
+                            // 3'lü maç gösterimi
+                            <>
+                              <span className="text-yellow-400 text-xs mr-1">3'lü</span>
+                              <span className={`font-medium ${match.winner && match.eliminated?.includes(match.player1) ? 'text-red-400/60 line-through' : match.winner ? 'text-green-400' : 'text-white'}`}>
+                                {match.player1 || '?'}
+                              </span>
+                              <span className="text-white/40">vs</span>
+                              <span className={`font-medium ${match.winner && match.eliminated?.includes(match.player2) ? 'text-red-400/60 line-through' : match.winner ? 'text-green-400' : 'text-white'}`}>
+                                {match.player2 || '?'}
+                              </span>
+                              <span className="text-white/40">vs</span>
+                              <span className={`font-medium ${match.winner && match.eliminated?.includes(match.player3) ? 'text-red-400/60 line-through' : match.winner ? 'text-green-400' : 'text-white'}`}>
+                                {match.player3 || '?'}
+                              </span>
+                            </>
+                          ) : (
+                            // Normal 2'li maç
+                            <>
+                              <span className={`font-medium ${match.winner === match.player1 ? 'text-green-400' : match.winner ? 'text-red-400/60 line-through' : 'text-white'}`}>
+                                {match.player1 || '?'}
+                              </span>
+                              <span className="text-white/40">vs</span>
+                              <span className={`font-medium ${match.winner === match.player2 ? 'text-green-400' : match.winner ? 'text-red-400/60 line-through' : 'text-white'}`}>
+                                {match.player2 || '?'}
+                              </span>
+                            </>
+                          )}
                         </div>
                         {match.winner && (
-                          <span className="text-green-400 text-sm">✓ {match.winner}</span>
+                          <span className="text-green-400 text-xs">
+                            {match.isTriple ? `❌ ${match.eliminated?.[0]}` : `✓ ${match.winner}`}
+                          </span>
                         )}
                       </div>
                     </div>
@@ -139,7 +159,6 @@ function TournamentBracket({ tournament, currentUser }) {
           </div>
         )}
 
-        {/* Eliminated */}
         {eliminated.length > 0 && !champion && (
           <div className="mt-4 pt-4 border-t border-white/10">
             <p className="text-white/60 text-sm mb-2">Elenenler</p>
@@ -195,7 +214,7 @@ export default function Home() {
       } else if (event === 'spin_start' && !spinning) {
         handleRemoteSpin(payload)
       } else if (event === 'spin_result') {
-        setWinner({ name: payload.winner })
+        setWinner({ name: payload.winner, isEliminated: payload.isEliminated })
         setShowConfetti(true)
         setTimeout(() => setShowConfetti(false), 4000)
       }
@@ -334,7 +353,7 @@ export default function Home() {
 
   const removeItem = async (itemId) => {
     if (!['admin', 'moderator'].includes(currentUser.role)) return
-    if (currentRoom.tournament && !currentRoom.tournament.champion) return // Turnuva aktifken silme
+    if (currentRoom.tournament && !currentRoom.tournament.champion) return
 
     try {
       const newItems = currentRoom.items.filter(item => item.id !== itemId)
@@ -382,6 +401,58 @@ export default function Home() {
     }
   }
 
+  // Adil bracket oluşturma - 3'lü maç sistemi
+  const createFairBracket = (participants) => {
+    const shuffled = [...participants].sort(() => Math.random() - 0.5)
+    const rounds = []
+    let currentParticipants = [...shuffled]
+
+    while (currentParticipants.length > 1) {
+      const matches = []
+      const remaining = [...currentParticipants]
+      
+      // Tek sayıda ise 3'lü maç yap
+      if (remaining.length % 2 === 1 && remaining.length >= 3) {
+        // 3'lü maç
+        const tripleMatch = {
+          player1: remaining.pop(),
+          player2: remaining.pop(),
+          player3: remaining.pop(),
+          isTriple: true,
+          winner: null,
+          eliminated: []
+        }
+        matches.push(tripleMatch)
+      }
+      
+      // Kalan 2'li maçlar
+      while (remaining.length >= 2) {
+        matches.push({
+          player1: remaining.pop(),
+          player2: remaining.pop(),
+          isTriple: false,
+          winner: null
+        })
+      }
+
+      rounds.push({ matches })
+
+      // Sonraki tur için kazanan sayısını hesapla
+      let nextRoundCount = 0
+      matches.forEach(m => {
+        if (m.isTriple) {
+          nextRoundCount += 2 // 3'lü maçtan 2 kişi geçer
+        } else {
+          nextRoundCount += 1 // 2'li maçtan 1 kişi geçer
+        }
+      })
+
+      currentParticipants = Array(nextRoundCount).fill('TBD')
+    }
+
+    return rounds
+  }
+
   // Turnuva başlat
   const startTournament = async (mode) => {
     if (currentUser.role !== 'admin') return
@@ -399,30 +470,7 @@ export default function Home() {
     }
 
     if (mode === 'bracket') {
-      // Bracket oluştur
-      const shuffled = [...participants].sort(() => Math.random() - 0.5)
-      const rounds = []
-      let currentParticipants = shuffled
-
-      while (currentParticipants.length > 1) {
-        const matches = []
-        for (let i = 0; i < currentParticipants.length; i += 2) {
-          matches.push({
-            player1: currentParticipants[i],
-            player2: currentParticipants[i + 1] || null, // Bye durumu
-            winner: currentParticipants[i + 1] ? null : currentParticipants[i] // Tek kalan direkt geçer
-          })
-        }
-        rounds.push({ matches })
-        currentParticipants = matches.map(m => m.winner || 'TBD').filter(p => p !== 'TBD')
-        if (matches.every(m => m.winner)) {
-          currentParticipants = matches.map(m => m.winner)
-        } else {
-          currentParticipants = Array(Math.ceil(matches.length / 2)).fill('TBD')
-        }
-      }
-
-      tournament.rounds = rounds
+      tournament.rounds = createFairBracket(participants)
     }
 
     try {
@@ -434,7 +482,6 @@ export default function Home() {
     }
   }
 
-  // Turnuvayı iptal et
   const cancelTournament = async () => {
     if (currentUser.role !== 'admin') return
 
@@ -452,21 +499,33 @@ export default function Home() {
 
     const tournament = currentRoom.tournament
     let wheelItems = []
+    let activeMatch = null
+    let matchIndex = -1
 
     if (tournament.mode === 'survivor') {
-      // Son Kalan modu - elenmemiş olanlar
       wheelItems = tournament.participants
         .filter(p => !tournament.eliminated.includes(p))
         .map((name, i) => ({ id: i, name }))
     } else if (tournament.mode === 'bracket') {
-      // Bracket modu - aktif maçın oyuncuları
       const currentRoundData = tournament.rounds[tournament.currentRound - 1]
-      const activeMatch = currentRoundData.matches.find(m => !m.winner && m.player1 && m.player2)
+      matchIndex = currentRoundData.matches.findIndex(m => !m.winner)
+      activeMatch = currentRoundData.matches[matchIndex]
+      
       if (activeMatch) {
-        wheelItems = [
-          { id: 1, name: activeMatch.player1 },
-          { id: 2, name: activeMatch.player2 }
-        ]
+        if (activeMatch.isTriple) {
+          // 3'lü maç
+          wheelItems = [
+            { id: 1, name: activeMatch.player1 },
+            { id: 2, name: activeMatch.player2 },
+            { id: 3, name: activeMatch.player3 }
+          ]
+        } else {
+          // 2'li maç
+          wheelItems = [
+            { id: 1, name: activeMatch.player1 },
+            { id: 2, name: activeMatch.player2 }
+          ]
+        }
       }
     }
 
@@ -483,12 +542,7 @@ export default function Home() {
     const finalAngle = totalRotation % 360
     const sliceAngle = 360 / wheelItems.length
     const winnerIndex = Math.floor((360 - finalAngle + sliceAngle / 2) % 360 / sliceAngle)
-    const winnerItem = wheelItems[winnerIndex % wheelItems.length]
-
-    // Survivor modunda kazanan elenir, bracket modunda kazanan geçer
-    const eliminatedPlayer = tournament.mode === 'survivor' 
-      ? winnerItem.name 
-      : wheelItems.find(w => w.name !== winnerItem.name)?.name
+    const selectedItem = wheelItems[winnerIndex % wheelItems.length]
 
     setRotation(totalRotation)
 
@@ -496,21 +550,21 @@ export default function Home() {
       await roomDB.broadcast(channelRef.current, 'spin_start', {
         rotation: totalRotation,
         spinBy: currentUser.name,
-        winner: winnerItem.name
+        winner: selectedItem.name
       })
     }
 
     spinTimeoutRef.current = setTimeout(async () => {
-      setWinner(winnerItem)
+      const isEliminated = tournament.mode === 'survivor' || (activeMatch && activeMatch.isTriple)
+      setWinner({ name: selectedItem.name, isEliminated })
       setShowConfetti(true)
       setSpinning(false)
 
-      // Turnuvayı güncelle
       let updatedTournament = { ...tournament }
 
       if (tournament.mode === 'survivor') {
         // Çıkan elenir
-        updatedTournament.eliminated = [...tournament.eliminated, winnerItem.name]
+        updatedTournament.eliminated = [...tournament.eliminated, selectedItem.name]
         
         const remaining = tournament.participants.filter(
           p => !updatedTournament.eliminated.includes(p)
@@ -522,41 +576,62 @@ export default function Home() {
           updatedTournament.currentRound = tournament.currentRound + 1
         }
       } else if (tournament.mode === 'bracket') {
-        // Bracket güncelle
-        const rounds = [...tournament.rounds]
+        const rounds = JSON.parse(JSON.stringify(tournament.rounds))
         const currentRoundData = rounds[tournament.currentRound - 1]
-        const matchIndex = currentRoundData.matches.findIndex(m => !m.winner && m.player1 && m.player2)
-        
-        if (matchIndex !== -1) {
-          currentRoundData.matches[matchIndex].winner = winnerItem.name
-          updatedTournament.eliminated = [...tournament.eliminated, eliminatedPlayer]
+        const match = currentRoundData.matches[matchIndex]
 
-          // Tüm maçlar bitti mi?
-          const allMatchesDone = currentRoundData.matches.every(m => m.winner)
-          
-          if (allMatchesDone) {
-            const winners = currentRoundData.matches.map(m => m.winner)
-            
-            if (winners.length === 1) {
-              // Final bitti
-              updatedTournament.champion = winners[0]
+        if (match.isTriple) {
+          // 3'lü maçta çıkan elenir, diğer 2'si geçer
+          match.eliminated = [selectedItem.name]
+          match.winner = 'completed'
+          updatedTournament.eliminated = [...tournament.eliminated, selectedItem.name]
+        } else {
+          // 2'li maçta seçilen kazanır
+          match.winner = selectedItem.name
+          const loser = match.player1 === selectedItem.name ? match.player2 : match.player1
+          updatedTournament.eliminated = [...tournament.eliminated, loser]
+        }
+
+        // Tüm maçlar bitti mi?
+        const allMatchesDone = currentRoundData.matches.every(m => m.winner)
+
+        if (allMatchesDone) {
+          // Kazananları topla
+          const winners = []
+          currentRoundData.matches.forEach(m => {
+            if (m.isTriple) {
+              // 3'lü maçtan elenmeyen 2 kişi geçer
+              const allPlayers = [m.player1, m.player2, m.player3]
+              allPlayers.forEach(p => {
+                if (!m.eliminated.includes(p)) winners.push(p)
+              })
             } else {
-              // Sonraki tura geç
-              updatedTournament.currentRound = tournament.currentRound + 1
+              winners.push(m.winner)
+            }
+          })
+
+          if (winners.length === 1) {
+            // Şampiyon!
+            updatedTournament.champion = winners[0]
+          } else {
+            // Sonraki tura geç
+            updatedTournament.currentRound = tournament.currentRound + 1
+
+            // Sonraki turun maçlarını güncelle
+            if (rounds[tournament.currentRound]) {
+              const nextRound = rounds[tournament.currentRound]
+              let winnerIdx = 0
               
-              // Sonraki turun maçlarını güncelle
-              if (rounds[tournament.currentRound]) {
-                const nextRound = rounds[tournament.currentRound]
-                let winnerIdx = 0
-                nextRound.matches.forEach(match => {
-                  if (!match.player1 || match.player1 === 'TBD') {
-                    match.player1 = winners[winnerIdx++]
-                  }
-                  if (!match.player2 || match.player2 === 'TBD') {
-                    match.player2 = winners[winnerIdx++]
-                  }
-                })
-              }
+              nextRound.matches.forEach(match => {
+                if (match.isTriple) {
+                  if (!match.player1 || match.player1 === 'TBD') match.player1 = winners[winnerIdx++]
+                  if (!match.player2 || match.player2 === 'TBD') match.player2 = winners[winnerIdx++]
+                  if (!match.player3 || match.player3 === 'TBD') match.player3 = winners[winnerIdx++]
+                } else {
+                  if (!match.player1 || match.player1 === 'TBD') match.player1 = winners[winnerIdx++]
+                  if (!match.player2 || match.player2 === 'TBD') match.player2 = winners[winnerIdx++]
+                }
+              })
             }
           }
         }
@@ -565,7 +640,9 @@ export default function Home() {
       }
 
       const historyEntry = {
-        winner: tournament.mode === 'survivor' ? `❌ ${winnerItem.name} elendi` : `✓ ${winnerItem.name} kazandı`,
+        winner: tournament.mode === 'survivor' || (activeMatch && activeMatch.isTriple)
+          ? `❌ ${selectedItem.name} elendi`
+          : `✓ ${selectedItem.name} kazandı`,
         spinBy: currentUser.name,
         time: new Date().toISOString(),
         round: tournament.currentRound
@@ -589,8 +666,9 @@ export default function Home() {
 
       if (channelRef.current) {
         await roomDB.broadcast(channelRef.current, 'spin_result', {
-          winner: winnerItem.name,
-          spinBy: currentUser.name
+          winner: selectedItem.name,
+          spinBy: currentUser.name,
+          isEliminated: tournament.mode === 'survivor' || (activeMatch && activeMatch.isTriple)
         })
       }
 
@@ -602,7 +680,6 @@ export default function Home() {
   const spinWheel = async () => {
     if (spinning || currentRoom.items.length < 2) return
 
-    // Turnuva aktifse turnuva çarkını çevir
     if (currentRoom.tournament && !currentRoom.tournament.champion) {
       return spinTournamentWheel()
     }
@@ -710,12 +787,20 @@ export default function Home() {
           .map((name, i) => ({ id: i, name }))
       } else if (t.mode === 'bracket') {
         const currentRoundData = t.rounds[t.currentRound - 1]
-        const activeMatch = currentRoundData?.matches.find(m => !m.winner && m.player1 && m.player2)
+        const activeMatch = currentRoundData?.matches.find(m => !m.winner)
         if (activeMatch) {
-          return [
-            { id: 1, name: activeMatch.player1 },
-            { id: 2, name: activeMatch.player2 }
-          ]
+          if (activeMatch.isTriple) {
+            return [
+              { id: 1, name: activeMatch.player1 },
+              { id: 2, name: activeMatch.player2 },
+              { id: 3, name: activeMatch.player3 }
+            ]
+          } else {
+            return [
+              { id: 1, name: activeMatch.player1 },
+              { id: 2, name: activeMatch.player2 }
+            ]
+          }
         }
       }
     }
@@ -723,6 +808,19 @@ export default function Home() {
   }
 
   const wheelItems = getWheelItems()
+
+  // Aktif maç bilgisi
+  const getActiveMatchInfo = () => {
+    if (!currentRoom?.tournament || currentRoom.tournament.champion) return null
+    const t = currentRoom.tournament
+    if (t.mode !== 'bracket') return null
+    
+    const currentRoundData = t.rounds[t.currentRound - 1]
+    const activeMatch = currentRoundData?.matches.find(m => !m.winner)
+    return activeMatch
+  }
+
+  const activeMatch = getActiveMatchInfo()
 
   return (
     <main className="min-h-screen p-4 overflow-x-hidden">
@@ -750,7 +848,7 @@ export default function Home() {
                 className="w-full p-4 bg-gradient-to-r from-purple-500 to-pink-500 rounded-xl text-white font-bold hover:opacity-90 transition-opacity"
               >
                 <div className="text-xl mb-1">🏅 Bracket Turnuvası</div>
-                <div className="text-sm opacity-80">1v1 eşleşmeler, kazanan ilerler!</div>
+                <div className="text-sm opacity-80">2'li ve 3'lü maçlar, kazanan/kalanlar ilerler!</div>
               </button>
 
               <button
@@ -762,7 +860,7 @@ export default function Home() {
             </div>
 
             <p className="text-white/50 text-sm text-center mt-4">
-              {currentRoom?.items.length} katılımcı ile turnuva başlayacak
+              {currentRoom?.items.length} katılımcı • Tek sayıda 3'lü maç yapılır
             </p>
           </div>
         </div>
@@ -781,7 +879,7 @@ export default function Home() {
             </p>
             <div className="inline-flex items-center gap-2 bg-green-500/20 text-green-300 px-4 py-2 rounded-full text-sm border border-green-500/30">
               <span className="w-2 h-2 bg-green-400 rounded-full animate-pulse" />
-              Turnuva Modu Yeni! 🏆
+              Adil Turnuva Sistemi! 🏆
             </div>
           </div>
 
@@ -805,7 +903,7 @@ export default function Home() {
 
           <div className="mt-12 text-center text-white/60 text-sm space-y-1">
             <p>⚡ Gerçek zamanlı senkronizasyon</p>
-            <p>🏆 Turnuva modu</p>
+            <p>🏆 Adil 3'lü maç sistemi</p>
             <p>👥 Sınırsız katılımcı</p>
           </div>
         </div>
@@ -1102,7 +1200,9 @@ export default function Home() {
                       <span className="bg-yellow-500/20 text-yellow-300 px-4 py-2 rounded-full font-bold">
                         {currentRoom.tournament.mode === 'survivor' 
                           ? `🎯 Tur ${currentRoom.tournament.currentRound} - Çıkan Elenir!`
-                          : `🏅 Tur ${currentRoom.tournament.currentRound} - Kazanan Geçer!`
+                          : activeMatch?.isTriple
+                            ? `🎯 Tur ${currentRoom.tournament.currentRound} - 3'lü Maç (Çıkan Elenir!)`
+                            : `🏅 Tur ${currentRoom.tournament.currentRound} - Kazanan Geçer!`
                         }
                       </span>
                     </div>
@@ -1136,12 +1236,12 @@ export default function Home() {
 
                   {winner && !spinning && (
                     <div className={`mt-6 p-5 rounded-2xl text-center shadow-2xl winner-announcement ${
-                      currentRoom.tournament?.mode === 'survivor'
+                      winner.isEliminated
                         ? 'bg-gradient-to-r from-red-500 via-orange-500 to-red-500 shadow-red-500/30'
                         : 'bg-gradient-to-r from-yellow-400 via-orange-500 to-red-500 shadow-orange-500/30'
                     }`}>
                       <p className="text-white font-black text-2xl">
-                        {currentRoom.tournament?.mode === 'survivor' ? '❌ Elenen ❌' : '🎉 Kazanan 🎉'}
+                        {winner.isEliminated ? '❌ Elenen ❌' : '🎉 Kazanan 🎉'}
                       </p>
                       <p className="text-white font-bold text-3xl mt-1">
                         {winner.name}
